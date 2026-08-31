@@ -29,6 +29,30 @@ def box_mask(f, cellIDs, marginal=[150e6, 50e6, 50e6, 50e6, 50e6, 50e6]):
     return res
 
 
+def check_surface(surface):
+    print("Points:", surface.GetOutput().GetNumberOfPoints())
+    print("Cells:", surface.GetOutput().GetNumberOfCells())
+
+    fe = vtk.vtkFeatureEdges()
+    fe.SetInputData(surface.GetOutput())
+    fe.NonManifoldEdgesOn()
+    fe.BoundaryEdgesOff()
+    fe.FeatureEdgesOff()
+    fe.ManifoldEdgesOff()
+    fe.Update()
+    print("non-manifold:", fe.GetOutput().GetNumberOfCells())
+
+
+    fe2 = vtk.vtkFeatureEdges()
+    fe2.SetInputData(surface.GetOutput())
+    fe2.BoundaryEdgesOn()
+    fe2.NonManifoldEdgesOff()
+    fe2.FeatureEdgesOff()
+    fe2.ManifoldEdgesOff()
+    fe2.Update()
+    print("boundary:", fe2.GetOutput().GetNumberOfCells())
+
+
 def make_volume_and_surface(
     f0, f1,
     SDF_filen,
@@ -248,48 +272,14 @@ def make_volume_and_surface(
     # add volume to vtk grid
     vtkreader = pt.vlsvfile.VlsvVtkReader()
     vtkreader.SetReader(f1)
-    f1.add_cached_variable(final_flags, volname_init)
+    f1.add_cached_variable(final_flags, volume_name)
     vtkreader.Update()
     vtkreader.addArrayFromVlsv("cellid")
-    vtkreader.addArrayFromVlsv(volname_init)
+    vtkreader.addArrayFromVlsv(volume_name)
     vtkreader.Modified()
     vtkreader.Update()
 
-
-    def check_surface(surface):
-        try:
-            try:
-                surface.Update()
-            except:
-                print("ah")
-            print("Points:", surface.GetOutput().GetNumberOfPoints())
-            print("Cells:", surface.GetOutput().GetNumberOfCells())
-
-            fe = vtk.vtkFeatureEdges()
-            fe.SetInputData(surface.GetOutput())
-            fe.NonManifoldEdgesOn()
-            fe.BoundaryEdgesOff()
-            fe.FeatureEdgesOff()
-            fe.ManifoldEdgesOff()
-            fe.Update()
-            print("non-manifold:", fe.GetOutput().GetNumberOfCells())
-
-
-            fe2 = vtk.vtkFeatureEdges()
-            fe2.SetInputData(surface.GetOutput())
-            fe2.BoundaryEdgesOn()
-            fe2.NonManifoldEdgesOff()
-            fe2.FeatureEdgesOff()
-            fe2.ManifoldEdgesOff()
-            fe2.Update()
-            print("boundary:", fe2.GetOutput().GetNumberOfCells())
-        except:
-            print("oh")
-
-
-
-
-
+    # get a dualgrid out of VlsvVtkReader
     dualgrid = vtk.vtkHyperTreeGridToDualGrid()
     dualgrid.SetInputConnection(vtkreader.GetOutputPort())
     vtkreader.Update()
@@ -301,10 +291,8 @@ def make_volume_and_surface(
     #clean.SetToleranceIsAbsolute(False)
     #clean.Update()
     #dualgrid = clean
-    #
 
-
-    # separate volume
+    # separate volume using flags
     threshold = vtk.vtkThreshold()
     threshold.SetInputArrayToProcess(
         0, 0, 0, vtk.vtkDataObject.FIELD_ASSOCIATION_POINTS, volname_init
@@ -314,12 +302,7 @@ def make_volume_and_surface(
     threshold.SetLowerThreshold(1.0)
     threshold.Update()
 
-    #geom = vtk.vtkGeometryFilter()
-    #geom.SetInputData(threshold.GetOutput())
-    #geom.Update()
-    #surface = geom.GetOutput()
-    #
-    #
+    # make outer surface out of the thresholded volume
     surf = vtk.vtkDataSetSurfaceFilter()
     surf.SetInputConnection(threshold.GetOutputPort())
     surf.Update()
@@ -372,7 +355,7 @@ def make_volume_and_surface(
         print("after smoothing:")
         check_surface(vtk_polydata)
 
-    else:
+    else: # no Delaunay, just surface of whatever flagged volume we had
 
         clean = vtk.vtkCleanPolyData()
         clean.SetInputConnection(vtk_polydata.GetOutputPort())
@@ -384,7 +367,8 @@ def make_volume_and_surface(
         print("after clean:")
         check_surface(vtk_polydata)
 
-        #if volume_name != "plasmasheet":
+        # edge connectivity filter, outputs largest region using edge connectivity
+        # this might need reconsideration for plasmasheet
         vtk_connectivity_filter = vtk.vtkPolyDataEdgeConnectivityFilter() #vtk.vtkPolyDataConnectivityFilter()
         vtk_connectivity_filter.SetInputConnection(vtk_polydata.GetOutputPort())
         vtk_connectivity_filter.SetExtractionModeToLargestRegion()
@@ -481,10 +465,9 @@ def main():
 
 
     outdir = "/turso/group/spacephysics/vlasiator/data/L1/3D/FHA/region_ids/"+areaname+"/"
-   # for now variables for 0000700-0001000 need to be read from L0 (no vlsvcache available so no variables from L1 but vtkvslvinterface needs L1 not L0?)
+   # for now variables for 0000700-0001000 in FHA need to be read from L0 (no vlsvcache available so no variables from L1 but vtkvslvinterface needs L1 not L0?)
     datafile = "/home/group/spacephysics/vlasiator/data/L0/3D/FHA/bulk1/bulk1.{:07d}.vlsv".format(timeid)
     datafile_L1 = "/home/group/spacephysics/vlasiator/data/L1/3D/FHA/bulk1/bulk1.{:07d}.vlsv".format(timeid)
-
 
 
     f = pt.vlsvfile.VlsvReader(datafile)
