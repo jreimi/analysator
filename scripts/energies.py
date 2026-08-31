@@ -1,3 +1,20 @@
+"""Script for calculating energy fluxes through a VTK PolyData surface
+    and energies within a volume defined by signed distances in .vlsv grid.
+
+    Usage example:
+
+    .. code-block:: python
+
+        calculate_energies(fn = "bulkfile.vlsv",
+            in_surface_fn = "surface.vtp",
+            out_surface_flux_fn = "surface_flux.vtp",
+            in_SDF_fn = "surface_SDF.vlsv",
+            out_energy_vlsv_fn = "region_energies.vlsv",
+            out_csv = "energies.csv")
+
+"""
+
+
 import analysator as pt
 import numpy as np
 import matplotlib.pyplot as plt
@@ -8,25 +25,19 @@ from vtk.util.numpy_support import vtk_to_numpy, numpy_to_vtk
 
 
 
-def calculate_energies(fn, in_surface_fn, out_surface_flux_fn, in_SDF_fn, out_energy_vlsv_fn, out_path, out_csv):
+def calculate_energies(fn, in_surface_fn, out_surface_flux_fn, in_SDF_fn, out_energy_vlsv_fn, out_csv):
     """
     Calculate energy fluxes through a surface and energies within a volume.
 
     The surface flux is calculated using data interpolated at the cell centers
     of the VTK surface.
 
-    :param fn: Name of the .vlsv data file to be read by vlsvReader.
-    :param in_surface_fn: Name of the input .vtp file containing the VTK
-        PolyData object describing the surface.
-    :param out_surface_flux_fn: Name of the .vtp output file for the calculated
-        surface energy fluxes.
-    :param in_SDF_fn: Name of the .vlsv input file containing the signed distance
-        function SDF named "SDF".
-    :param out_energy_vlsv_fn: Name of the output .vlsv file containing
-        the calculated energies within the volume.
-    :param out_path: Path to the directory where output files are stored.
-    :param out_csv: Name of the output CSV file containing the calculated
-        energy values.
+    :param fn: Name of the .vlsv data file to be read by vlsvReader for variables and datareducers.
+    :param in_surface_fn: Name of the input .vtp file containing the VTK PolyData object describing the surface.
+    :param out_surface_flux_fn: Name of the .vtp output file for the calculated surface energy fluxes.
+    :param in_SDF_fn: Name of the .vlsv input file containing the signed distance function SDF named "SDF".
+    :param out_energy_vlsv_fn: Name of the output .vlsv file containing the calculated energies within the volume.
+    :param out_csv: Name of the output CSV file containing the calculated energy values.
     """
 
 
@@ -40,7 +51,8 @@ def calculate_energies(fn, in_surface_fn, out_surface_flux_fn, in_SDF_fn, out_en
     vtk_reader.Update()
     vtk_polydata = vtk_reader.GetOutput()
 
-    # make sure we have surface cell normals, areas and centres
+    # Make sure we have surface cell normals, areas and centres
+    # If cannot be read from .vtp file, calculate them here
     try:
         normals = vtk_to_numpy(vtk_polydata.GetCellData().GetArray("Normals"))
         print("normals found")
@@ -83,9 +95,9 @@ def calculate_energies(fn, in_surface_fn, out_surface_flux_fn, in_SDF_fn, out_en
         #print(areas)
 
 
-    coords = np.array(centers)
-    n_points = np.shape(coords)[0]
+    coords = np.array(centers) # surface cell centre point coordinates
 
+    # read variables at the centres of the surface cells
     S = f.read_interpolated_variable("vg_poynting", coords)
     rho = f.read_interpolated_variable("vg_rhom", coords)
     V_norm = f.read_interpolated_variable("vg_v", coords,  operator="magnitude")
@@ -93,7 +105,7 @@ def calculate_energies(fn, in_surface_fn, out_surface_flux_fn, in_SDF_fn, out_en
     p_tensor = f.read_interpolated_variable("vg_ptensor", coords)
     p_diag = f.read_interpolated_variable("vg_ptensor_diagonal", coords)
 
-
+    # reshape if needed
     n_points = np.shape(coords)[0]
     rho = rho.reshape(n_points, 1)
     V_norm = V_norm.reshape(n_points, 1)
@@ -106,12 +118,12 @@ def calculate_energies(fn, in_surface_fn, out_surface_flux_fn, in_SDF_fn, out_en
 
     # Hydrodynamic and total flux
     H = kinetic + thermal + pressure_work
-    K = S + H
+    K = S + H # poynting flux + hydrodynamic flux
 
-    Normal_component_K = np.einsum('ij,ij->i', K, normals) #np.sum(K*normals, axis=1) #areas*np.einsum('ij,ij->i', K, normals)
-    Normal_component_K = np.nan_to_num(Normal_component_K)
+    # "Normal_component_[ ]": flux dot normal vector
+    # "[ ]_cell_flux": cell area * (flux dot normal vector)
+    Normal_component_K = np.nan_to_num(np.einsum('ij,ij->i', K, normals))
     K_cell_flux = np.nan_to_num(areas*np.einsum('ij,ij->i', K, normals))
-
 
     # also get Poynting flux, hydrodynamic flux (and hd fluxes separately, just save everything)
     Normal_component_S = np.nan_to_num(np.einsum('ij,ij->i', S, normals))
@@ -210,15 +222,13 @@ def calculate_energies(fn, in_surface_fn, out_surface_flux_fn, in_SDF_fn, out_en
 
 
     cellids = f.read_variable("CellID")
-    region_cellids = cellids[region_flags==1]
+    region_cellids = cellids[region_flags==1] # cellids of cells inside region
+
     celldxs = f.get_cell_dx(region_cellids)
-    dVs = np.prod(celldxs, axis=1) # volumes of cells inside volume
-
-    nonregion_cellids = cellids[region_flags==0]
-    nondVs = np.prod(f.get_cell_dx(nonregion_cellids), axis=1)
+    dVs = np.prod(celldxs, axis=1) # volumes of cells inside region
 
 
-    # Energy densities
+    # Energy densities [J/m^3]
     P_th = f.read_variable("vg_pressure", cellids=region_cellids)
     P_dyn = f.read_variable("vg_pdyn", cellids=region_cellids)
     P_mag = f.read_variable("vg_p_magnetic", cellids=region_cellids)
@@ -227,8 +237,7 @@ def calculate_energies(fn, in_surface_fn, out_surface_flux_fn, in_SDF_fn, out_en
     U_mag = P_mag # vg_p_magnetic = B / 2.0 / mu_0
     U_tot = U_mag+U_th+U_kin
 
-
-    # energies
+    # energies [J] in cells
     E_th = U_th*dVs
     E_kin = U_kin*dVs
     E_mag = U_mag*dVs
@@ -236,6 +245,7 @@ def calculate_energies(fn, in_surface_fn, out_surface_flux_fn, in_SDF_fn, out_en
 
     V_tot = np.sum(dVs) # total region volume
 
+    # total energies in region ('integral' of U dV)
     Emag_tot = np.sum(E_mag)
     Eth_tot = np.sum(E_th)
     Ekin_tot = np.sum(E_kin)
@@ -316,7 +326,7 @@ def calculate_energies(fn, in_surface_fn, out_surface_flux_fn, in_SDF_fn, out_en
 
 
 
-    if True: #use pandas, easier option, could add manual csv write later
+    if True: # uses pandas for convenience, could be done with manual csv write if needed
         import pandas as pd
         simtime = int(f.read_parameter("time"))
          # save *everything*
@@ -368,15 +378,9 @@ def calculate_energies(fn, in_surface_fn, out_surface_flux_fn, in_SDF_fn, out_en
 
 
 
-
-
-
-
-
-
-
-
 def main():
+
+    # possible command line arguments: bulkfile index, areaname
 
     if len(sys.argv) == 2:
         timeid = int(sys.argv[1])
@@ -392,21 +396,19 @@ def main():
 
     datafilen = "/home/group/spacephysics/vlasiator/data/L0/3D/FHA/bulk1/bulk1.{:07d}.vlsv".format(timeid)
 
+    # .vtp and .vlsv files where surface PolyData and signed distance to surface are stored
     in_path = "/turso/group/spacephysics/vlasiator/data/L1/3D/FHA/region_ids/"+areaname+"/"
-    out_path = "FHAenergies/final/"+areaname+"/"
-
-
     SDF_vlsv = in_path+"FHA_{:07d}_".format(timeid)+areaname+"_SDF.vlsv"
     surface_vtp = in_path+"FHA_{:07d}_".format(timeid)+areaname+"_surface.vtp"
 
+    # .vtp, .vlsv, and .csv files where the results (surface fluxes, volume energies, timestep results) will be saved
+    out_path = "FHAenergies/final/"+areaname+"/"
     surface_flux_vtp = out_path+"FHA_{:07d}_".format(timeid)+areaname+"_surface_flux.vtp"
     energy_volume_vlsv = out_path+"FHA_{:07d}_".format(timeid)+areaname+"_energy_density.vlsv"
-
     out_csv = out_path+"energies.csv"
-    f_data = pt.vlsvfile.VlsvReader(file_name=datafilen)
 
 
-    calculate_energies(datafilen, surface_vtp, surface_flux_vtp, SDF_vlsv, energy_volume_vlsv, out_path, out_csv)
+    calculate_energies(datafilen, surface_vtp, surface_flux_vtp, SDF_vlsv, energy_volume_vlsv, out_csv)
 
 
 

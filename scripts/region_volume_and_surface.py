@@ -1,3 +1,31 @@
+"""Script for making a VTK PolyData surface and SDF from the surface.
+    Function "make_volume_and_surface()" takes conditions, and surface is made as outer surface of simulation
+    cells that fulfill the conditions.
+
+    Usage example for making a surface "magnetopause" using conditions for "vg_rho" and "vg_connection"
+    with region border in -x direction set to -200e6 m:
+
+    .. code-block:: python
+
+        conditions = {
+            "vg_rho": [None, 500000],
+            "vg_connection": 0.0,
+            }
+
+        conditions["operator"] = "or"
+        condition_dict.append(conditions)
+
+        make_volume_and_surface(
+            f,
+            SDF_filen = "magnetopause_SDF.vlsv"
+            surf_filen = "magnetopause_surface.vtp"
+            condition_dicts = condition_dict,
+            volume_name="magnetopause",
+            convex=False,
+            crop =[-200e6, None, None, None, None, None]):
+
+"""
+
 import logging
 import sys
 import numpy as np
@@ -6,32 +34,47 @@ from vtk.util.numpy_support import vtk_to_numpy
 import analysator as pt
 
 
-def box_mask(f, cellIDs, marginal=[150e6, 50e6, 50e6, 50e6, 50e6, 50e6]):
+def box_crop(f, cellIDs, crop_edges=[-300e6, None, None, None, None, None]):
     """
-    Crops simulation box for calculations, output flags outside of cropped box will be 0.
+    Crops simulation cells using a given rectangle, output flags outside of cropped area will be 0.
 
         :param f: a VlsvReader
-        :param cellIDs: cellIDs to be masked
-        :kword marginal: 6-length list of wanted marginal lengths from mesh edges in meters [negx, negy, negz, posx, posy, posz]
+        :param cellIDs: cellIDs to be cropped
+        :param crop_edges: 6-length list of wanted crop box edges in meters: [negx, negy, negz, posx, posy, posz].
+            Any can be set as None for no crop in that direction.
         :returns: 0/1 mask in input order of cellIDs.
     """
-    [xmin, ymin, zmin, xmax, ymax, zmax] = f.get_spatial_mesh_extent()
+    mesh_edges = f.get_spatial_mesh_extent()
+    print(mesh_edges)
     coords = f.get_cell_coordinates(cellIDs)
-    res = np.zeros((len(coords)), dtype=bool)
+    res = np.ones((len(coords)), dtype=int)
+
+    # If there are Nones, use mesh edges
+    edges = crop_edges.copy()
+    for i in range(len(crop_edges)):
+        if crop_edges[i] is None:
+            edges[i] = mesh_edges[i]
 
     for i,coord in enumerate(coords):
-        if np.any((coord[0] < xmin+marginal[0], coord[0] > xmax-marginal[3],
-                    coord[1] < ymin+marginal[1], coord[1] > ymax-marginal[4],
-                    coord[2] < zmin+marginal[2], coord[2] > zmax-marginal[5])):
+        if np.any((coord[0] < edges[0],
+                    coord[0] > edges[3],
+                    coord[1] < edges[1],
+                    coord[1] > edges[4],
+                    coord[2] < edges[2],
+                    coord[2] > edges[5])):
             res[i] = 0
-        else:
-            res[i] = 1
     return res
 
 
 def check_surface(surface):
-    print("Points:", surface.GetOutput().GetNumberOfPoints())
-    print("Cells:", surface.GetOutput().GetNumberOfCells())
+    points = surface.GetOutput().GetNumberOfPoints()
+    cells = surface.GetOutput().GetNumberOfCells()
+    print("Points:", points)
+    print("Cells:", cells)
+
+    if points == 0 and cells == 0:
+        print("No points or cells, surface cannot be made.")
+        sys.exit()
 
     fe = vtk.vtkFeatureEdges()
     fe.SetInputData(surface.GetOutput())
@@ -53,14 +96,16 @@ def check_surface(surface):
     print("boundary:", fe2.GetOutput().GetNumberOfCells())
 
 
+
 def make_volume_and_surface(
-    f0, f1,
+    f,
     SDF_filen,
     surf_filen,
     condition_dicts,
     variable_dict={},
     volume_name="volume",
-    convex=False):
+    convex=False,
+    crop=False):
     """
     Create a volume and its outer surface from VLSV data.
 
@@ -81,14 +126,14 @@ def make_volume_and_surface(
 
     ``operator``
         Determines how the individual conditions within the dictionary are
-        combined. The default is ``"or"``, meaning that the dictionary condition for a cell is
-        satisfied if at least one condition is fulfilled. If set to ``"and"``,
+        combined. The default is "or", meaning that the dictionary condition for a cell is
+        satisfied if at least one condition is fulfilled. If set to "and",
         all conditions in the dictionary must be fulfilled.
 
     ``flag_type``
         Determines how the result of the dictionary is represented. The
-        default ``"01"`` produces a binary flag (0 or 1), where 1 means that
-        the dictionary conditions are satisfied for a cell. ``"fraction"`` produces the
+        default "01" produces a binary flag (0 or 1), where 1 means that
+        the dictionary conditions are satisfied for a cell. "fraction" produces the
         fraction of conditions that are fulfilled.
 
     ``flag_threshold``
@@ -99,8 +144,7 @@ def make_volume_and_surface(
     After all condition dictionaries have been evaluated, only cells that have a positive (1)
     flag for every dictionary are included in the final volume.
 
-    :param f0: VlsvReader object for L0 VLSV bulk file.
-    :param f1: VlsvReader object for L1 VLSV bulk file.
+    :param f: VlsvReader object for L1 VLSV bulk file.
     :param SDF_filen: Path and filename of the .vlsv file in which the
         resulting signed distance function is saved.
     :param surf_filen: Path and filename of the .vtp file in which the
@@ -117,18 +161,22 @@ def make_volume_and_surface(
     :param convex: If ``True``, use VTK's vtkDelaunay3D  to create the convex
         hull of the selected volume, producing an outer convex surface.
         Defaults to ``False``.
+    :param crop: Defaults to ``False``. A 6-length list of distances in meters
+        can be given to crop initial region at some axis value.
+        Axes are [negx, negy, negz, posx, posy, posz], and any can be set as
+        None for no crop in that direction.
     """
 
-    cellids = f0.read_variable("CellID")
+    cellids = f.read_variable("CellID")
     volname_init = volume_name+"_initial"
 
     # get all vlsvgrid points
-    query_points = f0.get_cell_coordinates(cellids)
-    index = int(f0.read_parameter("time"))
+    query_points = f.get_cell_coordinates(cellids)
+    index = int(f.read_parameter("time"))
     final_flags = -1
 
-    vlsv_writer = pt.vlsvfile.VlsvWriter(f1, SDF_filen)
-    vlsv_writer.copy_variables_list(f1, ["CellID", "vg_rho"])
+    vlsv_writer = pt.vlsvfile.VlsvWriter(f, SDF_filen)
+    vlsv_writer.copy_variables_list(f, ["CellID", "vg_rho"])
 
 
     # error messages
@@ -178,7 +226,7 @@ def make_volume_and_surface(
         for var in conditions: # variables to be read straight from vlsvreader # Must be a better way to do this
             if isinstance(var, str):  # no operator
                 try:
-                    variable_data[var] = f0.read_variable(name=var, cellids=-1) # var name as is
+                    variable_data[var] = f.read_variable(name=var, cellids=-1) # var name as is
                 except:
                     # population/non-population var to try if reading given variable fails
                     oldvar = var
@@ -191,14 +239,14 @@ def make_volume_and_surface(
                     errormsg_alt(oldvar, altvar)
 
                     try:
-                        variable_data[var] = f0.read_variable(
+                        variable_data[var] = f.read_variable(
                             name=altvar, cellids=-1, operator=var[1])
                         altinfo(oldvar, altvar)
                     except:
                         errormsg(oldvar, altvar)
             else:
                 try:
-                    variable_data[var] = f0.read_variable(name=var[0], cellids=-1, operator=var[1])
+                    variable_data[var] = f.read_variable(name=var[0], cellids=-1, operator=var[1])
                 except:
                     # population/non-population var to try if reading given variable fails
                     oldvar = var[0]
@@ -211,7 +259,7 @@ def make_volume_and_surface(
                     errormsg_alt(oldvar, altvar)
 
                     try:
-                        variable_data[var] = f0.read_variable(name=altvar, cellids=-1, operator=var[1])
+                        variable_data[var] = f.read_variable(name=altvar, cellids=-1, operator=var[1])
                         altinfo(oldvar, altvar)
                     except:
                         errormsg(oldvar, altvar)
@@ -264,6 +312,11 @@ def make_volume_and_surface(
         print("No flags found, discarding timestep.")
         return 0
 
+    # cropping the region should be done here if needed
+    if crop is not None:
+        crop_mask = box_crop(f, cellids, crop_edges=crop)
+        final_flags = final_flags*crop_mask
+
     # save initial flags to vlsv
     vlsv_writer.write_variable_info(
         pt.calculations.VariableInfo(final_flags, volname_init, "-", latex="", latexunits=""), "SpatialGrid", 1,)
@@ -271,8 +324,8 @@ def make_volume_and_surface(
     # now that we have the flags, let's move to vtk
     # add volume to vtk grid
     vtkreader = pt.vlsvfile.VlsvVtkReader()
-    vtkreader.SetReader(f1)
-    f1.add_cached_variable(final_flags, volume_name)
+    vtkreader.SetReader(f)
+    f.add_cached_variable(final_flags, volume_name)
     vtkreader.Update()
     vtkreader.addArrayFromVlsv("cellid")
     vtkreader.addArrayFromVlsv(volume_name)
@@ -295,7 +348,7 @@ def make_volume_and_surface(
     # separate volume using flags
     threshold = vtk.vtkThreshold()
     threshold.SetInputArrayToProcess(
-        0, 0, 0, vtk.vtkDataObject.FIELD_ASSOCIATION_POINTS, volname_init
+        0, 0, 0, vtk.vtkDataObject.FIELD_ASSOCIATION_POINTS, volume_name
     )
     threshold.SetInputData(dualgrid.GetOutput())
     threshold.SetUpperThreshold(1.0)
@@ -315,9 +368,6 @@ def make_volume_and_surface(
     if convex: #use 3D Delaunay triangulation
         clean = vtk.vtkCleanPolyData()
         clean.SetInputConnection(vtk_polydata.GetOutputPort())
-        clean.ConvertLinesToPointsOff()
-        clean.ConvertPolysToLinesOff()
-        clean.ConvertStripsToPolysOff()
         clean.Update()
         vtk_polydata = clean
         print("after clean:")
@@ -359,9 +409,10 @@ def make_volume_and_surface(
 
         clean = vtk.vtkCleanPolyData()
         clean.SetInputConnection(vtk_polydata.GetOutputPort())
-        clean.ConvertLinesToPointsOff()
-        clean.ConvertPolysToLinesOff()
-        clean.ConvertStripsToPolysOff()
+        # with PolydataConnectivityFilter these shouldn't matter
+        #clean.ConvertLinesToPointsOff() # needs to be on
+        #clean.ConvertPolysToLinesOff() # needs to be off
+        #clean.ConvertStripsToPolysOff() # does not seem to matter?
         clean.Update()
         vtk_polydata = clean
         print("after clean:")
@@ -369,7 +420,7 @@ def make_volume_and_surface(
 
         # edge connectivity filter, outputs largest region using edge connectivity
         # this might need reconsideration for plasmasheet
-        vtk_connectivity_filter = vtk.vtkPolyDataEdgeConnectivityFilter() #vtk.vtkPolyDataConnectivityFilter()
+        vtk_connectivity_filter = vtk.vtkPolyDataConnectivityFilter() #vtk.vtkPolyDataConnectivityFilter()
         vtk_connectivity_filter.SetInputConnection(vtk_polydata.GetOutputPort())
         vtk_connectivity_filter.SetExtractionModeToLargestRegion()
         vtk_connectivity_filter.Update()
@@ -436,11 +487,6 @@ def make_volume_and_surface(
     for i, coord in enumerate(query_points):
         sdf[i] = implicitPolyDataDistance.EvaluateFunction(coord)
 
-    #if volume_name=="plasmasheet": # plasmasheet gets a lot of bad normals so sign of SDF is sometimes wrong, fix outside magnetopause to always be outside plasmasheet
-    #    mpause_SDF = variable_dict["SDF_magnetopause"]
-    #    original_sdf = sdf
-    #    sdf = np.where(mpause_SDF > 0, np.abs(original_sdf), original_sdf) # make plasmasheet SDF positive where mpause SDF is positive
-
     # save the SDF to vlsv file
     vlsv_writer.write_variable_info(
         pt.calculations.VariableInfo(sdf, "SDF", "-", latex="", latexunits=""), "SpatialGrid", 1,)
@@ -463,15 +509,10 @@ def main():
 
     #print(timeid)
 
-
-    outdir = "/turso/group/spacephysics/vlasiator/data/L1/3D/FHA/region_ids/"+areaname+"/"
-   # for now variables for 0000700-0001000 in FHA need to be read from L0 (no vlsvcache available so no variables from L1 but vtkvslvinterface needs L1 not L0?)
-    datafile = "/home/group/spacephysics/vlasiator/data/L0/3D/FHA/bulk1/bulk1.{:07d}.vlsv".format(timeid)
+    outdir = areaname+"/"
     datafile_L1 = "/home/group/spacephysics/vlasiator/data/L1/3D/FHA/bulk1/bulk1.{:07d}.vlsv".format(timeid)
 
-
-    f = pt.vlsvfile.VlsvReader(datafile)
-    f1 = pt.vlsvfile.VlsvReader(datafile_L1)
+    f = pt.vlsvfile.VlsvReader(datafile_L1)
     SDF_fn = outdir + "FHA_{:07d}_".format(timeid) + areaname + "_SDF.vlsv"
     surf_fn = outdir + "FHA_{:07d}_".format(timeid) + areaname + "_surface.vtp"
 
@@ -490,12 +531,13 @@ def main():
         condition_dict.append(conditions)
 
         make_volume_and_surface(
-            f, f1,
+            f,
             SDF_fn,
             surf_fn,
             condition_dict,
             variable_dict,
-            volume_name=areaname)
+            volume_name=areaname,
+            crop = [-300e6, None, None, None, None, None])
 
 
     elif areaname == "magnetopause_convex":
@@ -503,7 +545,7 @@ def main():
              "vg_beta_star": [0.0, 0.5]}
         condition_dict.append(conditions)
         make_volume_and_surface(
-            f, f1,
+            f,
             SDF_fn,
             surf_fn,
             condition_dict, # can be a list of dictionaries
@@ -519,7 +561,7 @@ def main():
         }
 
         make_volume_and_surface(
-            f, f1,
+            f,
             SDF_fn,
             surf_fn,
             condition_dict, # can be a list of dictionaries
@@ -546,7 +588,7 @@ def main():
         condition_dict = [conditions_SDF, conditions_SDF2, conditions_SDF3]
 
         make_volume_and_surface(
-            f, f1,
+            f,
             SDF_fn,
             surf_fn,
             condition_dict,
@@ -559,7 +601,7 @@ def main():
         surf_fn = outdir + "FHA_{:07d}_".format(timeid) + "lobe_N_surface.vtp"
 
         make_volume_and_surface(
-            f, f1,
+            f,
             SDF_fn,
             surf_fn,
             condition_dict_N,
@@ -571,7 +613,7 @@ def main():
         surf_fn = outdir + "FHA_{:07d}_".format(timeid) + "lobe_S_surface.vtp"
 
         make_volume_and_surface(
-            f, f1,
+            f,
             SDF_fn,
             surf_fn,
             condition_dict_S,
@@ -593,7 +635,7 @@ def main():
         condition_dict = [conditions, conditions_SDF_mpause, conditions_SDF_closed]
 
         make_volume_and_surface(
-            f, f1,
+            f,
             SDF_fn,
             surf_fn,
             condition_dict, # can be a list of dictionaries
@@ -617,7 +659,7 @@ def main():
 
 
         make_volume_and_surface(
-            f, f1,
+            f,
             SDF_fn,
             surf_fn,
             condition_dict, # can be a list of dictionaries
