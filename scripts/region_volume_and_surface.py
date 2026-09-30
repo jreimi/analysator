@@ -22,7 +22,8 @@
             condition_dicts = condition_dict,
             volume_name="magnetopause",
             convex=False,
-            crop =[-200e6, None, None, None, None, None]):
+            crop =[-200e6, None, None, None, None, None],
+            inner_boundary = False):
 
 """
 
@@ -105,7 +106,8 @@ def make_volume_and_surface(
     variable_dict={},
     volume_name="volume",
     convex=False,
-    crop=False):
+    crop=False
+    inner_boundary=False):
     """
     Create a volume and its outer surface from VLSV data.
 
@@ -165,6 +167,10 @@ def make_volume_and_surface(
         can be given to crop initial region at some axis value.
         Axes are [negx, negy, negz, posx, posy, posz], and any can be set as
         None for no crop in that direction.
+    :param inner_boundary: Whether to exclude the inner boundary at some distance
+        from Earth. Defaults to ``False``. If ``True``, or float, initial
+        flags are set to 0 within ... m (``True``) or the given distance
+        (float, in meters) from the Earth.
     """
 
     cellids = f.read_variable("CellID")
@@ -313,9 +319,21 @@ def make_volume_and_surface(
         return 0
 
     # cropping the region should be done here if needed
-    if crop is not None:
+    if crop is not False:
         crop_mask = box_crop(f, cellids, crop_edges=crop)
         final_flags = final_flags*crop_mask
+
+    # manual inner boundary for volume
+    if inner_boundary is not False:
+        if inner_boundary is True:
+            rad = 60e6 # simulation inner boundary should be at about 30 000 km so try to make sure we're far enough
+        elif isinstance(inner_boundary, float):
+            rad = inner_boundary
+
+        coords = f.get_cell_coordinates(cellIDs)
+        norms = np.linalg.norm(coords, axis=1)
+        final_flags[norms < rad] = 0
+
 
     # save initial flags to vlsv
     vlsv_writer.write_variable_info(
@@ -509,7 +527,7 @@ def main():
 
     #print(timeid)
 
-    outdir = areaname+"/"
+    outdir = "FHAregions/cropped/"+areaname+"/"
     datafile_L1 = "/home/group/spacephysics/vlasiator/data/L1/3D/FHA/bulk1/bulk1.{:07d}.vlsv".format(timeid)
 
     f = pt.vlsvfile.VlsvReader(datafile_L1)
@@ -537,7 +555,8 @@ def main():
             condition_dict,
             variable_dict,
             volume_name=areaname,
-            crop = [-300e6, None, None, None, None, None])
+            crop = [-300e6, None, None, None, None, None],
+            inner_boundary = 60e6)
 
 
     elif areaname == "magnetopause_convex":
